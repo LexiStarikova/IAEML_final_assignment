@@ -41,3 +41,28 @@ JAX_PLATFORM_NAME=cpu python src/main.py
 ---
 
 Tested with python 3.11, Ubuntu 24.04 adm64 on Oct 20, 2025.
+
+## Robotaxi environment (Stage 1)
+
+- Implemented in `src/env/robotaxi.py` with a bicycle-like model driven by acceleration and steering actions, friction, and speed limits.
+- Observation includes path following cues, goal direction, speed, heading, and collision rays.
+- Reward encourages progress to goal, penalises collisions, large steering/accel, and comfort-speed violations.
+
+Run the interactive renderer (with throttle/steer controls) using the new env:
+
+```bash
+python src/main.py --map-id 1 --fps 60 --num-ray-sensors 32
+```
+
+## PPO training pipeline (Stage 2)
+
+- Minimal PPO reference implementation in `src/train_robotaxi_ppo.py` (Flax + Optax, vectorised envs via AutoResetWrapper).
+- Default config: 4 envs, horizon 128, 10 updates for a quick sanity run.
+
+Example quick run (CPU):
+
+```bash
+python src/train_robotaxi_ppo.py --num-envs 4 --horizon 128 --learning-rate 3e-4 --seed 0
+```
+
+Artifacts: the script prints update-level rewards/losses; extend the update loop for longer training if desired.

@@ -214,6 +214,22 @@ class PygameFrontend:
 
     def handle_keys(self):
         keys = pygame.key.get_pressed()
+
+        # Robotaxi controls: acceleration (m/s^2) and steering (rad)
+        if hasattr(self.params, "max_accel"):
+            accel = 0.0
+            steer = 0.0
+            if keys[pygame.K_UP] or keys[pygame.K_w]:
+                accel += float(self.params.max_accel)
+            if keys[pygame.K_DOWN] or keys[pygame.K_s]:
+                accel -= float(self.params.max_brake)
+            if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+                steer += float(self.params.max_steer) * 0.5
+            if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+                steer -= float(self.params.max_steer) * 0.5
+            return jnp.array([accel, steer], dtype=jnp.float32)
+
+        # Fallback to displacement controls (legacy BaseEnv)
         action = jnp.array([0.0, 0.0], dtype=jnp.float32)
         if keys[pygame.K_UP] or keys[pygame.K_w]:
             action += jnp.array([0, 1])

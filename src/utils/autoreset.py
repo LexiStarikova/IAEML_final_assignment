@@ -21,7 +21,6 @@ class AutoResetWrapper(equinox.Module):
         # init_state: BaseEnvState | None,
     ) -> Tuple[chex.Array, BaseEnvState]:
         # Just call original reset
-        jax.debug.print("Autoreset!")
         obs, state = self.env.reset(key, self.env_params, self.init_state)
         return obs, state
 
