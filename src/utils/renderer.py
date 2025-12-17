@@ -1,4 +1,5 @@
 from functools import partial
+from pathlib import Path
 import jax
 import pygame
 import jax.numpy as jnp
@@ -21,13 +22,57 @@ YELLOW = (200, 200, 50)
 # TODO: draw time
 
 class PygameFrontend:
-    def __init__(self, env, env_params, init_state, eval_mode=False, agent_fn=None):
+    def __init__(
+        self,
+        env,
+        env_params,
+        init_state,
+        eval_mode=False,
+        agent_fn=None,
+        record_path: str | None = None,
+        record_fps: int = 60,
+        max_frames: int | None = None,
+    ):
         pygame.init()
         self.env = env
         self.params = env_params
         self.init_state = init_state
         self.eval_mode = eval_mode
         self.agent_fn = agent_fn
+        self.max_frames = max_frames
+        self.frame_idx = 0
+
+        self._record_path = record_path
+        self._record_writer = None
+        self._record_png_dir: Path | None = None
+        self._record_fps = record_fps
+        if record_path is not None:
+            p = Path(record_path)
+            # If the user passed a directory, treat it as a PNG frames directory.
+            if p.exists() and p.is_dir():
+                self._record_png_dir = p
+                self._record_png_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                # Prefer video writer if available, otherwise dump PNG frames.
+                try:
+                    import imageio.v2 as imageio  # type: ignore
+
+                    suffix = p.suffix.lower()
+                    if suffix == ".mp4":
+                        # Force ffmpeg; otherwise imageio may pick an unexpected writer (e.g., TIFF)
+                        self._record_writer = imageio.get_writer(
+                            str(p), fps=record_fps, format="ffmpeg"
+                        )
+                    elif suffix == ".gif":
+                        self._record_writer = imageio.get_writer(str(p), fps=record_fps)
+                    else:
+                        # Unknown extension: fall back to frame directory
+                        raise ValueError(f"Unsupported record extension: {suffix}")
+                except Exception:
+                    # Fallback: save PNG frames into the provided path (treated as a directory)
+                    self._record_png_dir = p
+                    self._record_png_dir.mkdir(parents=True, exist_ok=True)
 
         h, w = int(env_params.map_height_width[0]), int(env_params.map_height_width[1])
         self.CELL_SIZE = 40  # pixels per map unit
@@ -94,7 +139,7 @@ class PygameFrontend:
         # Draw lines connecting waypoints
         for start, end in zip(pixels[:-1], pixels[1:]):
             pygame.draw.line(self.screen, BLUE, start, end, 3)
-            
+
     def draw_rays_transparent(self, screen: pygame.Surface, agent_pos, rays, cell_size, alpha=80):
         """
         Draw transparent red rays from the agent's position.
@@ -190,13 +235,13 @@ class PygameFrontend:
 
         # draw rays after obstacles
         self.draw_rays_transparent(self.screen, agent_pos, rays, self.CELL_SIZE)
-        
+
         # Draw agent
         y, x = agent_pos
         center_px = (int((x + 0.5) * self.CELL_SIZE), int((y + 0.5) * self.CELL_SIZE))
         pygame.draw.circle(self.screen, BLUE, center_px, self.AGENT_RADIUS_PX)
 
-        
+
         # Draw agent facing direction
         dir_vec = agent_forward_dir
         norm = math.sqrt(dir_vec[0] ** 2 + dir_vec[1] ** 2) + 1e-6
@@ -206,9 +251,9 @@ class PygameFrontend:
         )
         end_pos = (center_px[0] + dir_vec_px[0], center_px[1] + dir_vec_px[1])
         pygame.draw.line(self.screen, YELLOW, center_px, end_pos, 3)
-        
+
         # Draw info
-        self.draw_info(self.screen, self.info) 
+        self.draw_info(self.screen, self.info)
 
         pygame.display.flip()
 
@@ -252,7 +297,11 @@ class PygameFrontend:
                     self.running = False
 
             if self.eval_mode and self.agent_fn is not None:
-                action = self.agent_fn(self.state)
+                # Backward compatible: agent_fn can accept (state) or (state, obs)
+                try:
+                    action = self.agent_fn(self.state, self.obs)
+                except TypeError:
+                    action = self.agent_fn(self.state)
             else:
                 action = self.handle_keys()
 
@@ -264,6 +313,25 @@ class PygameFrontend:
             # print(self.obs.collision_rays)
 
             self.draw()
+
+            # Record current frame after draw
+            if self._record_path is not None:
+                frame = pygame.surfarray.array3d(self.screen)  # (W,H,3)
+                frame = frame.transpose(1, 0, 2)  # -> (H,W,3)
+                if self._record_writer is not None:
+                    self._record_writer.append_data(frame)
+                elif self._record_png_dir is not None:
+                    pygame.image.save(
+                        self.screen,
+                        str(self._record_png_dir / f"frame_{self.frame_idx:06d}.png"),
+                    )
+
+            self.frame_idx += 1
+            if self.max_frames is not None and self.frame_idx >= self.max_frames:
+                self.running = False
+
             self.clock.tick(FPS)
 
+        if self._record_writer is not None:
+            self._record_writer.close()
         pygame.quit()

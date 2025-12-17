@@ -1,0 +1,29 @@
+{
+  "step": 200,
+  "config": {
+    "num_envs": 8,
+    "horizon": 256,
+    "updates": 500,
+    "learning_rate": 0.0003,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_eps": 0.2,
+    "entropy_coef": 0.01,
+    "value_coef": 0.5,
+    "max_grad_norm": 1.0,
+    "minibatch_size": 1024,
+    "update_epochs": 4,
+    "seed": 0,
+    "map_id": 1,
+    "max_steps": 1000,
+    "path_length": 200,
+    "fps": 60,
+    "perception_radius": 6.0,
+    "num_ray_sensors": 32,
+    "pretrain_iters": 3000,
+    "pretrain_batch": 256,
+    "save_dir": "checkpoints",
+    "save_every": 100,
+    "run_name": "robotaxi_ppo"
+  }
+}

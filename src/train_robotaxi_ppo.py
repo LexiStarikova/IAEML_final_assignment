@@ -1,11 +1,14 @@
 import argparse
 from dataclasses import dataclass
 from typing import Dict, Tuple
+from pathlib import Path
+import json
 
 import jax
 import jax.numpy as jnp
 import optax
 import flax.linen as nn
+from flax import serialization
 from flax.training.train_state import TrainState
 
 from env.robotaxi import RobotaxiEnv
@@ -36,6 +39,35 @@ class PPOConfig:
     # Behavior cloning warmstart (strongly improves convergence on maze-like maps)
     pretrain_iters: int = 2000
     pretrain_batch: int = 256
+    # Checkpointing
+    save_dir: str = "checkpoints"
+    save_every: int = 100
+    run_name: str = "robotaxi_ppo"
+    save_best: bool = True
+    best_threshold: float = 1.0
+
+
+def _cfg_to_json(cfg: PPOConfig) -> dict:
+    return cfg.__dict__.copy()
+
+
+def save_checkpoint(save_dir: str, run_name: str, step: int, params, cfg: PPOConfig) -> Path:
+    out_dir = Path(save_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = out_dir / f"{run_name}_step{step:06d}.msgpack"
+    meta_path = out_dir / f"{run_name}_step{step:06d}.json"
+    ckpt_path.write_bytes(serialization.to_bytes(params))
+    meta_path.write_text(json.dumps({"step": step, "config": _cfg_to_json(cfg)}, indent=2))
+    return ckpt_path
+
+
+def load_checkpoint(ckpt_path: str, model: nn.Module, obs_example: jnp.ndarray):
+    """
+    Returns params restored from msgpack using model.init structure.
+    """
+    init_vars = model.init(jax.random.PRNGKey(0), obs_example)
+    params = serialization.from_bytes(init_vars, Path(ckpt_path).read_bytes())
+    return params
 
 
 class ActorCritic(nn.Module):
@@ -284,6 +316,9 @@ def train(cfg: PPOConfig):
 
     # start PPO from warmstarted params
     train_state = train_state.replace(params=bc_state.params)
+    save_checkpoint(cfg.save_dir, cfg.run_name, step=0, params=train_state.params, cfg=cfg)
+
+    best_min_goal_dist = float("inf")
 
     def evaluate_mean_policy(params, steps: int = 1000):
         """Deterministic eval: action = tanh(mean), single env from init_state."""
@@ -380,9 +415,26 @@ def train(cfg: PPOConfig):
             f"loss={float(loss):.4f} policy={float(metrics['policy_loss']):.4f} value={float(metrics['value_loss']):.4f}"
         )
 
+        # Save best checkpoint when we get inside the goal region (or any chosen threshold).
+        if cfg.save_best:
+            cur_min_gd = float(min_goal_dist)
+            if cur_min_gd < cfg.best_threshold and cur_min_gd < best_min_goal_dist:
+                best_min_goal_dist = cur_min_gd
+                save_checkpoint(
+                    cfg.save_dir,
+                    f"{cfg.run_name}_best",
+                    step=update,
+                    params=train_state.params,
+                    cfg=cfg,
+                )
+                print(f"  saved best checkpoint at update={update:04d} min_goal_dist={best_min_goal_dist:.3f}")
+
         if update % 50 == 0:
             success, eval_min_gd = evaluate_mean_policy(train_state.params, steps=cfg.max_steps)
             print(f"  eval@{update:04d}: success={success} eval_min_goal_dist={eval_min_gd:.3f}")
+
+        if cfg.save_every > 0 and update % cfg.save_every == 0:
+            save_checkpoint(cfg.save_dir, cfg.run_name, step=update, params=train_state.params, cfg=cfg)
 
     return train_state
 
@@ -402,6 +454,12 @@ def parse_args():
     parser.add_argument("--num-ray-sensors", type=int, default=32)
     parser.add_argument("--pretrain-iters", type=int, default=2000)
     parser.add_argument("--pretrain-batch", type=int, default=256)  # reserved for future minibatching
+    parser.add_argument("--save-dir", type=str, default="checkpoints")
+    parser.add_argument("--save-every", type=int, default=100)
+    parser.add_argument("--run-name", type=str, default="robotaxi_ppo")
+    parser.add_argument("--save-best", action="store_true", default=True)
+    parser.add_argument("--no-save-best", action="store_false", dest="save_best")
+    parser.add_argument("--best-threshold", type=float, default=1.0)
     return parser.parse_args()
 
 
@@ -421,6 +479,11 @@ def main():
         num_ray_sensors=args.num_ray_sensors,
         pretrain_iters=args.pretrain_iters,
         pretrain_batch=args.pretrain_batch,
+        save_dir=args.save_dir,
+        save_every=args.save_every,
+        run_name=args.run_name,
+        save_best=args.save_best,
+        best_threshold=args.best_threshold,
     )
     train(cfg)
 
