@@ -222,40 +222,29 @@ This provides comprehensive information about the environment, vehicle state, an
 
 ### 4. Difficulties Encountered and Resolution
 
-#### Difficulty 1: Path-aware reward shaping in mazes
+I met several problems while working on this assignment.
 
-**Problem**: Initial reward function used only Euclidean distance to goal. In maze-like environments, the agent would receive negative rewards when taking necessary detours, making learning very difficult.
+#### Difficulty 1: The reward wasn`t working in mazes
 
-**Solution**: Implemented path-based reward shaping that uses the dynamically computed optimal path. The agent receives rewards for:
-- Reducing distance to the path (staying on route)
-- Moving along the path direction (making progress even on detours)
+First I tried to just use the euclidean distance to the goal as reward. But this didn`t work at all. In maze environments the agent would get negative rewards when it had to go around obstacles, even though that's the right thing to do. So the agent never learned anything useful because it was punished for doing the correct thing.
 
-This provides correct guidance even when Euclidean distance to goal temporarily increases.
+Then I applied the path that the environment already computes. So instead of just rewarding getting closer to goal, I now reward:
+- getting closer to the planned path
+- moving in the direction the path wants me to go
 
-#### Difficulty 2: Kinematic bicycle model at low speeds
+#### Difficulty 2: The car couldn`t turn at low speeds
 
-**Problem**: The standard bicycle model requires forward velocity to turn, but in tight spaces the agent needs to turn even at low speeds. At zero speed, the model cannot turn, causing the agent to get stuck.
+I implemented the bicycle model, but then the agent would get stuck in corners because at zero speed you cant turn at all with the normal bicycle model. The car would just stop and be unable to rotate.
 
-**Solution**:
-1. Introduced `turn_min_speed` parameter that ensures effective speed for turning is always ≥ 2.0 m/s
-2. Added a direct yaw rate term (`yaw_rate_gain * steer`) that allows rotation even without forward velocity
+I added two fixes:
+1. `turn_min_speed` parameter: so the effective speed for turning is never zero (>=2.0)
+2. An extra yaw rate term that lets me rotate even without moving forward
 
-This combination enables maneuverability at all speeds while maintaining realistic high-speed behavior.
+It might not be perfectly realistic but it works for the task.
 
-#### Difficulty 3: Reward weight tuning
+#### Difficulty 3: Tuning reward weights
 
-**Problem**: Initial reward weights led to suboptimal behavior: either the agent would ignore the path and go straight (too much goal-distance reward) or get stuck making tiny movements (too much path-following reward).
-
-**Solution**: Systematic tuning through experimentation:
-- Increased path-along reward (20.0) to provide strong directional guidance
-- Balanced goal progress (3.0) to provide motivation without conflicting with path
-- Kept penalties small (0.001-0.01) to avoid overwhelming shaping rewards
-
-#### Difficulty 4: JAX compilation and static arguments
-
-**Problem**: JAX's `jax.jit` requires static arguments to be specified. The environment parameters need to be marked as static, but some calculations depend on dynamic state.
-
-**Solution**: Used `@partial(jax.jit, static_argnames=("env_params",))` to mark `env_params` as static, allowing JAX to compile the step function efficiently while keeping state dynamic. The environment parameters are "baked in" during compilation, but state updates remain fast.
+Adjusting the reward weights took long. At first the agent would ignore the path completely and just try to drive straight to goal (but obviously fail in mazes). Or the opposite - it would make tiny movements trying to follow the path but never making progress. In the end i made the path-along reward quite high (20.0) because that seemed to give the best guidance. The goal progress reward is lower (3.0) so it doesnt conflict. And i kept all the penalties really small so they dont overwhelm the positive rewards.
 
 ---
 
@@ -460,80 +449,29 @@ The `AutoResetWrapper` automatically resets environments when they terminate, ma
 
 ### 3. Difficulties Encountered and Resolution
 
-#### Difficulty 1: Sparse reward problem
+Training the RL agent was definitely the hardest part.
 
-**Problem**: Initial attempts with sparse rewards (only on goal/collision) resulted in no learning. The agent never discovered successful trajectories due to exploration challenges.
+#### Difficulty 1: The agent wasnt learning anything
 
-**Solution**: Implemented dense reward shaping in Stage 1. The path-based rewards provide guidance at every step, making learning feasible. Combined with behavior cloning warmstart, the agent can learn from the start.
+At first i tried with sparse rewards (only reward when reaching goal or hitting obstacle). But the agent never learned anything useful, it just did random actions and never got close to the goal.
 
-#### Difficulty 2: Action space scaling
+The solution was to use the dense reward from stage 1. I also added behavior cloning warmstart: the agent learns to copy a simple expert first, then PPO can improve from there.
 
-**Problem**: The environment action space is asymmetric (acceleration: `[-4.0, 3.0]`, steering: `[-1.31, 1.31]` radians). Standard tanh squashing to `[-1, 1]` doesn't directly map to these ranges.
+#### Difficulty 2: Action scaling
 
-**Solution**: Implemented custom action scaling:
-- Acceleration: Positive values scale to `[0, max_accel]`, negative to `[-max_brake, 0]`
-- Steering: Symmetric scaling to `[-max_steer, max_steer]`
+I ended up writing a custom scaling function. For acceleration, positive actions scale to acceleration range and negative ones scale to braking range. For steering it's symmetric. The policy outputs in [-1, 1] and then I scale it to the right ranges.
 
-The policy outputs actions in `[-1, 1]` space, which are then scaled to environment ranges. This keeps the policy output normalized while respecting environment constraints.
+#### Difficulty 3: Log probability calculation
 
-#### Difficulty 3: Tanh-Gaussian log probability correction
+I was just using the normal gaussian log prob but that's wrong for tanh.
 
-**Problem**: When using tanh squashing, the log probability must account for the change of variables. The standard Gaussian log probability is incorrect for tanh-squashed actions.
+I needed to subtract `log(1 - tanh^2(a))` to account for the transformation. This is the jacobian correction. Without this PPO's importance sampling is completely wrong and training fails.
 
-**Solution**: Implemented correct log probability computation:
-```python
-def tanh_gaussian_log_prob(mean, log_std, tanh_actions):
-    atanh = arctanh(clip(tanh_actions, -0.999, 0.999))
-    log_prob = gaussian_log_prob(atanh, mean, log_std)
-    log_prob -= sum(log(1 - tanh_actions² + 1e-6))  # Jacobian correction
-    return log_prob
-```
+#### Difficulty 4: Training was unstable
 
-The Jacobian correction term `-log(1 - tanh²(a))` accounts for the tanh transformation, ensuring correct probability computation for PPO's importance sampling.
+The advantages would be huge sometimes and tiny other times, making the policy updates crazy. The agent would completely break and start doing nonsensical actions.
 
-#### Difficulty 4: Advantage normalization and instability
-
-**Problem**: Advantages can have very different scales across updates, causing training instability. Unnormalized advantages led to erratic policy updates.
-
-**Solution**: Normalize advantages before computing policy loss:
-```python
-adv_norm = (adv - adv.mean()) / (adv.std() + 1e-8)
-```
-
-This ensures advantages have zero mean and unit variance, providing stable, scale-invariant updates.
-
-#### Difficulty 5: Behavior cloning convergence
-
-**Problem**: Initial BC implementation struggled to learn the expert policy, even with simple expert. The policy would not converge to reasonable behavior.
-
-**Solution**:
-- Used tanh-squashed mean prediction (not raw mean) for BC loss
-- Increased BC iterations to 2000
-- Used same learning rate as PPO (3e-4)
-
-The key insight is that BC should predict the expert's tanh-squashed actions, not the pre-tanh values, because that's what the policy actually outputs.
-
-#### Difficulty 6: Memory efficiency with long horizons
-
-**Problem**: Storing full trajectories for long horizons (256 steps) across many environments (8) with large observations (72 dims) requires significant memory.
-
-**Solution**:
-- Process trajectories immediately after rollout
-- Flatten and shuffle for minibatching
-- Don't store unnecessary intermediate values
-- Use JAX's efficient array storage (no Python object overhead)
-
-Additionally, JAX's memory management is more efficient than PyTorch/TensorFlow due to functional programming model and XLA optimizations.
-
-#### Difficulty 7: Debugging JIT-compiled code
-
-**Problem**: JIT compilation makes debugging difficult because code execution is deferred and errors occur in compiled XLA code, not original Python.
-
-**Solution**:
-- Use `jax.disable_jit()` for debugging
-- Print values outside JIT-compiled functions
-- Use `jax.block_until_ready()` to force eager execution for inspection
-- Validate with small test cases before full training
+I fixed this by normalizing the advantages before using them in the loss. But the training is still not ideally stable.
 
 ---
 
